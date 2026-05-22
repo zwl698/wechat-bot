@@ -10,6 +10,7 @@
     "start": "node ./cli.js",
     "test": "node ./src/wechaty/testMessage.js",
     "test:analysis": "node ./src/analysis/__test__.js",
+    "test:wechat-rag": "node ./src/platforms/wechat/__test__.js",
     "lark:login": "node ./cli.js lark login",
     "wechat:analyze": "node ./cli.js analyze --stats-only",
     "agent": "node ./cli.js agent --im wechat --agent pi",

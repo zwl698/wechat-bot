@@ -307,11 +307,82 @@ wb start --serve ChatGPT
 wb start --serve deepseek
 ```
 
-启动后终端会展示二维码，扫码即可登录微信。登录后，收到的微信消息会追加写入：
+启动后终端会展示二维码，扫码即可登录微信。登录后，收到的微信消息会双写到本地 JSONL 和 SQLite；如果启用了 Qdrant 离线 RAG，还会同步写入本地向量库：
 
 ```text
 .data/wechat/messages.jsonl
+.data/wechat/message-vectors.jsonl
+.data/wechat/wechat-storage.db
 ```
+
+默认上下文构建策略：
+
+- 最近 `10` 条同会话历史对话。
+- RAG 精排 `10` 条相关历史记录。
+- 任一段内容超过 `WECHAT_CONTEXT_COMPRESS_LIMIT` 时自动压缩。
+- 默认固定人设是“微信里的老朋友，开朗活泼，偶尔有点小调皮”。
+- 兼容旧版本地 `JSONL` 数据：即使历史记录里还没有 `id` 字段，也会在读取时自动补一个稳定 ID，保证分析、回灌、去重和本地检索还能继续用。
+
+### 3.1 离线 RAG 和历史回灌
+
+如果你希望把微信历史完全留在本机，可以使用本地 Ollama Embedding + 本地 Qdrant：
+
+```env
+SERVICE_TYPE='deepseek'
+WECHAT_STORE_MESSAGES='true'
+WECHAT_CONTEXT_HISTORY_LIMIT='10'
+WECHAT_RAG_LIMIT='10'
+WECHAT_CONTEXT_COMPRESS_LIMIT='1000'
+WECHAT_FIXED_PERSONA='你是用户在微信里的老朋友，性格开朗活泼，偶尔有点小调皮，但分寸感在线。回复像真人聊天，别端着，也别用客服腔。'
+
+WECHAT_OFFLINE_RAG_PROVIDER='qdrant'
+OLLAMA_BASE_URL='http://127.0.0.1:11434'
+OLLAMA_EMBED_MODEL='nomic-embed-text'
+QDRANT_URL='http://127.0.0.1:6333'
+QDRANT_COLLECTION='wechat_messages'
+WECHAT_REINDEX_BATCH_SIZE='8'
+```
+
+先确保本机服务可用，例如：
+
+```sh
+ollama pull nomic-embed-text
+qdrant
+```
+
+历史消息回灌命令：
+
+```sh
+# 全量重建
+wb wechat:reindex
+
+# 只补未写入 Qdrant 的历史消息
+wb wechat:reindex --resume
+
+# 重建前先清空 collection
+wb wechat:reindex --reset
+
+# 只重建某个群聊 / 某个好友 / 命中过滤条件的消息
+wb wechat:reindex --room "研发群" --resume
+wb wechat:reindex --friend "张三" --start "2026-05-01T00:00:00Z"
+
+# 不做 npm link 时的等价写法
+npm run start -- wechat:reindex --resume --batch-size 16
+```
+
+参数说明：
+
+- `--resume`：先从 Qdrant 读取已有 `recordId`，只补断点之后缺失的消息。
+- `--reset`：重建前删除并重建当前 collection，适合模型切换或脏数据清理。
+- `--batch-size`：控制每批并发 embedding 数，默认读取 `WECHAT_REINDEX_BATCH_SIZE`。
+- `--room` / `--friend` / `--query` / `--start` / `--end`：只回灌命中过滤条件的消息。
+
+如果本地 Ollama 或 Qdrant 暂时不可用，检索会自动降级为本地 JSONL/SQLite 上的关键词 + 权重相似度排序，不会直接把整条回复链路打挂。
+
+补充说明：
+
+- `messages.jsonl`、`message-vectors.jsonl` 和 `wechat-storage.db` 会一起参与读取，程序优先合并去重，不要求你手工迁移旧数据。
+- 对于早期只有 JSONL、没有 `id` 的聊天记录，系统会按时间、会话、说话人和文本内容生成稳定 ID，避免分析结果为 0、重复回灌或上下文命中异常。
 
 ### 4. 本地微信数据和朋友圈
 
@@ -407,10 +478,19 @@ wb opencli -- wx-cli help
 
 ```sh
 npm run test:analysis
-node ./cli.js --help
+npm run test:wechat-rag
+node -e "import('./src/index.js').then(()=>process.exit(0))" -- --help
+node -e "import('./src/index.js').then(()=>process.exit(0))" -- wechat:reindex --help
 node ./cli.js wx help
 node ./cli.js pi -- --help
 ```
+
+当前这组测试会覆盖：
+
+- 本地分析命令读取历史消息、过滤群聊并输出统计。
+- 旧版 JSONL 数据在缺少 `id` 时的兼容读取。
+- 本地检索降级路径、Qdrant 检索路径、`wechat:reindex --resume/--reset`。
+- CLI 主帮助和 `wechat:reindex` 子命令帮助输出。
 
 如果使用 OpenAI、Claude、Kimi 等云端服务，请确保对应 API Key、余额和网络代理可用。
 

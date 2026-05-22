@@ -51,11 +51,14 @@ export function createWechatBot(options = {}) {
   bot.on('logout', onLogout)
   bot.on('friendship', onFriendShip)
   bot.on('message', async (message) => {
-    await captureWechatMessage(message, bot, {
+    const capturedRecord = await captureWechatMessage(message, bot, {
       dataDir: config.dataDir,
       storeMessages: config.storeMessages,
     })
-    await defaultMessage(message, bot, serviceType)
+    await defaultMessage(message, bot, serviceType, {
+      capturedRecord,
+      dataDir: config.dataDir,
+    })
   })
   bot.on('error', (error) => {
     console.error('bot error handle: ', error)

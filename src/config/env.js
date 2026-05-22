@@ -2,6 +2,12 @@ import dotenv from 'dotenv'
 
 const dotenvResult = dotenv.config()
 
+function readNumberEnv(key, fallback) {
+  const raw = process.env[key] ?? dotenvResult.parsed?.[key]
+  const value = Number(raw)
+  return Number.isFinite(value) && value > 0 ? value : fallback
+}
+
 export const env = {
   ...(dotenvResult.parsed || {}),
   ...process.env,
@@ -24,6 +30,18 @@ export function getWechatRuntimeConfig() {
     storeMessages: env.WECHAT_STORE_MESSAGES !== 'false',
     commandPrefix: env.BOT_COMMAND_PREFIX || '/',
     enableRemoteOpenCli: env.ENABLE_REMOTE_OPENCLI === 'true',
+    historyLimit: readNumberEnv('WECHAT_CONTEXT_HISTORY_LIMIT', 10),
+    ragLimit: readNumberEnv('WECHAT_RAG_LIMIT', 10),
+    contextCompressLimit: readNumberEnv('WECHAT_CONTEXT_COMPRESS_LIMIT', 1000),
+    vectorSearchLimit: readNumberEnv('WECHAT_VECTOR_SEARCH_LIMIT', 4000),
+    offlineRagProvider: env.WECHAT_OFFLINE_RAG_PROVIDER || 'local',
+    qdrantUrl: env.QDRANT_URL || 'http://127.0.0.1:6333',
+    qdrantCollection: env.QDRANT_COLLECTION || 'wechat_messages',
+    ollamaBaseUrl: env.OLLAMA_BASE_URL || 'http://127.0.0.1:11434',
+    ollamaEmbedModel: env.OLLAMA_EMBED_MODEL || 'nomic-embed-text',
+    reindexBatchSize: readNumberEnv('WECHAT_REINDEX_BATCH_SIZE', 8),
+    fixedPersona:
+      env.WECHAT_FIXED_PERSONA || '你是用户在微信里的老朋友，性格开朗活泼，偶尔有点小调皮，但分寸感在线。回复像真人聊天，别端着，也别用客服腔。',
   }
 }
 

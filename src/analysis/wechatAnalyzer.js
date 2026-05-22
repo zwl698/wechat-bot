@@ -87,7 +87,7 @@ export async function analyzeWechatMessages(options = {}) {
     }
   }
 
-  const getReply = getServe(options.serviceType || 'ChatGPT')
+  const getReply = getServe(options.serviceType || 'deepseek')
   const prompt = buildWechatAnalysisPrompt({ records, stats, target })
   const analysis = await getReply(prompt)
 

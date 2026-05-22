@@ -1,6 +1,78 @@
+import crypto from 'crypto'
 import { getServe } from './serve.js'
 import { getWechatRuntimeConfig } from '../config/env.js'
 import { handleWechatCommand } from '../platforms/wechat/commandRouter.js'
+import { persistWechatRecord } from '../platforms/wechat/messageStore.js'
+import { buildWechatContext } from './contextBuilder.js'
+
+function sanitizeQuestion(content = '', botName = '', autoReplyPrefix = '') {
+  return String(content || '')
+    .replace(botName, '')
+    .replace(autoReplyPrefix, '')
+    .trim()
+}
+
+function buildAssistantRecord(baseRecord, response) {
+  const timestamp = new Date().toISOString()
+  const text = String(response || '').trim()
+
+  return {
+    id: crypto
+      .createHash('sha1')
+      .update(JSON.stringify([baseRecord.conversationKey, 'assistant', timestamp, text]))
+      .digest('hex'),
+    timestamp,
+    type: 7,
+    typeName: 'Text',
+    isText: true,
+    isRoom: baseRecord.isRoom,
+    roomId: baseRecord.roomId || '',
+    roomName: baseRecord.roomName || '',
+    talkerId: baseRecord.receiverId || 'assistant',
+    talkerName: baseRecord.receiverName || 'assistant',
+    talkerAlias: '',
+    receiverId: baseRecord.talkerId || '',
+    receiverName: baseRecord.talkerName || baseRecord.talkerAlias || baseRecord.conversationName || '',
+    conversationKey: baseRecord.conversationKey,
+    conversationName: baseRecord.conversationName,
+    speakerName: 'assistant',
+    role: 'assistant',
+    text,
+    self: true,
+  }
+}
+
+async function generateReply(question, meta = {}, serviceType) {
+  const config = getWechatRuntimeConfig()
+  const getReply = getServe(serviceType)
+  const context = await buildWechatContext({
+    question,
+    dataDir: meta.dataDir || config.dataDir,
+    conversationKey: meta.capturedRecord?.conversationKey,
+    conversationName: meta.capturedRecord?.conversationName || meta.roomName || meta.alias || meta.name,
+    contactName: meta.alias || meta.name || meta.roomName,
+    currentMessageId: meta.capturedRecord?.id,
+    persona: config.fixedPersona,
+    historyLimit: config.historyLimit,
+    ragLimit: config.ragLimit,
+    searchLimit: config.vectorSearchLimit,
+  })
+
+  const response = await getReply(context.prompt)
+  return String(response || '').trim()
+}
+
+async function replyAndStore(target, response, meta = {}, runtimeConfig = {}) {
+  if (!response) return
+  await target.say(response)
+
+  if (meta.capturedRecord) {
+    await persistWechatRecord(buildAssistantRecord(meta.capturedRecord, response), {
+      dataDir: meta.dataDir || runtimeConfig.dataDir,
+      storeMessages: runtimeConfig.storeMessages,
+    })
+  }
+}
 
 /**
  * 默认消息发送
@@ -9,11 +81,10 @@ import { handleWechatCommand } from '../platforms/wechat/commandRouter.js'
  * @param ServiceType 服务类型 'GPT' | 'Kimi'
  * @returns {Promise<void>}
  */
-export async function defaultMessage(msg, bot, ServiceType = 'GPT') {
-  const { botName, autoReplyPrefix, aliasWhiteList, roomWhiteList, commandPrefix } = getWechatRuntimeConfig()
-  const getReply = getServe(ServiceType)
+export async function defaultMessage(msg, bot, ServiceType = 'deepseek', meta = {}) {
+  const runtimeConfig = getWechatRuntimeConfig()
+  const { botName, autoReplyPrefix, aliasWhiteList, roomWhiteList, commandPrefix } = runtimeConfig
   const contact = msg.talker() // 发消息人
-  const receiver = msg.to() // 消息接收人
   const content = msg.text() // 消息内容
   const room = msg.room() // 是否是群消息
   const roomName = (await room?.topic()) || null // 群名称
@@ -26,10 +97,19 @@ export async function defaultMessage(msg, bot, ServiceType = 'GPT') {
   const isBotSelf = botName === `@${remarkName}` || botName === `@${name}` // 是否是机器人自己
   const isBotSelfDebug = content.trimStart().startsWith('你是谁') // 是否是机器人自己的调试消息
   const isAuthorizedCommand = (room && isRoom) || (!room && isAlias)
-  // TODO 你们可以根据自己的需求修改这里的逻辑
-  if ((isBotSelf && !isBotSelfDebug) || !isText) return // 如果是机器人自己发送的消息或者消息类型不是文本则不处理
+  if ((isBotSelf && !isBotSelfDebug) || !isText) return
+
+  const messageMeta = {
+    ...meta,
+    roomName,
+    alias,
+    name,
+    dataDir: meta.dataDir || runtimeConfig.dataDir,
+  }
+
   try {
-    if (content.replace(`${botName}`, '').trimStart().startsWith(commandPrefix)) {
+    const normalizedForCommand = sanitizeQuestion(content, botName, '')
+    if (normalizedForCommand.trimStart().startsWith(commandPrefix)) {
       if (!isAuthorizedCommand) return
       const commandResult = await handleWechatCommand(content, {
         serviceType: ServiceType,
@@ -39,27 +119,27 @@ export async function defaultMessage(msg, bot, ServiceType = 'GPT') {
       })
       if (commandResult.handled) {
         if (commandResult.reply) {
-          await (room || contact).say(commandResult.reply)
+          await replyAndStore(room || contact, commandResult.reply, messageMeta, runtimeConfig)
         }
         return
       }
     }
 
-    // 区分群聊和私聊
-    // 群聊消息去掉艾特主体后，匹配自动回复前缀
-    if (isRoom && room && content.replace(`${botName}`, '').trimStart().startsWith(`${autoReplyPrefix}`)) {
-      const question = (await msg.mentionText()) || content.replace(`${botName}`, '').replace(`${autoReplyPrefix}`, '') // 去掉艾特的消息主体
+    if (isRoom && room && sanitizeQuestion(content, botName, '').trimStart().startsWith(`${autoReplyPrefix}`)) {
+      const mentionText = (await msg.mentionText()) || sanitizeQuestion(content, botName, '')
+      const question = sanitizeQuestion(mentionText, '', autoReplyPrefix)
+      if (!question) return
       console.log('🌸🌸🌸 / question: ', question)
-      const response = await getReply(question)
-      await room.say(response)
+      const response = await generateReply(question, messageMeta, ServiceType)
+      await replyAndStore(room, response, messageMeta, runtimeConfig)
     }
-    // 私人聊天，白名单内的直接发送
-    // 私人聊天直接匹配自动回复前缀
+
     if (isAlias && !room && content.trimStart().startsWith(`${autoReplyPrefix}`)) {
-      const question = content.replace(`${autoReplyPrefix}`, '')
+      const question = sanitizeQuestion(content, '', autoReplyPrefix)
+      if (!question) return
       console.log('🌸🌸🌸 / content: ', question)
-      const response = await getReply(question)
-      await contact.say(response)
+      const response = await generateReply(question, messageMeta, ServiceType)
+      await replyAndStore(contact, response, messageMeta, runtimeConfig)
     }
   } catch (e) {
     console.error(e)
@@ -92,7 +172,7 @@ export async function shardingMessage(message, bot) {
     return
   }
   realText = text.replace(`${botName}`, '')
-  const topic = await room.topic()
+  await room.topic()
   const response = await getChatGPTReply(realText)
   const result = `${realText}\n ---------------- \n ${response}`
   await trySay(room, result)

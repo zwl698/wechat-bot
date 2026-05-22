@@ -5,6 +5,7 @@ import path, { dirname } from 'path'
 import { fileURLToPath } from 'url'
 import { env, getWechatRuntimeConfig } from './config/env.js'
 import { analyzeWechatMessages } from './analysis/wechatAnalyzer.js'
+import { reindexWechatMessagesToQdrant } from './platforms/wechat/messageStore.js'
 import { larkListMessages, larkLogin, larkSearchMessages, larkSendText, larkStatus } from './adapters/lark.js'
 import { runOpenCli, runWxCli } from './adapters/opencli.js'
 import { runPi } from './adapters/pi.js'
@@ -57,7 +58,7 @@ function getMissingConfig(type) {
     case 'pi':
       return []
     default:
-      return ['SERVICE_TYPE']
+      return []
   }
 }
 
@@ -103,6 +104,36 @@ function printAnalysisResult(result) {
   if (result.analysis) {
     console.log('\n分析结果：')
     console.log(result.analysis)
+  }
+}
+
+function printReindexResult(result) {
+  if (result.disabled) {
+    console.log('当前未启用 Qdrant 离线 RAG，请先在 .env 中把 WECHAT_OFFLINE_RAG_PROVIDER 设为 qdrant。')
+    return
+  }
+
+  console.log('Qdrant 重建索引完成')
+  console.log(
+    JSON.stringify(
+      {
+        totalRecords: result.totalRecords,
+        candidates: result.candidates,
+        indexed: result.indexed,
+        skipped: result.skipped,
+        resumedSkipped: result.resumedSkipped,
+        failed: result.failed,
+      },
+      null,
+      2,
+    ),
+  )
+
+  if (result.failures?.length) {
+    console.log('\n失败样本：')
+    for (const item of result.failures) {
+      console.log(`- ${item}`)
+    }
   }
 }
 
@@ -153,7 +184,7 @@ program
   .option('--start <iso>', '开始时间 ISO 8601')
   .option('--end <iso>', '结束时间 ISO 8601')
   .option('--limit <number>', '最多读取最近 N 条本地消息', '5000')
-  .option('-s, --serve <type>', '用于生成深度分析的 AI 服务', env.SERVICE_TYPE || 'ChatGPT')
+  .option('-s, --serve <type>', '用于生成深度分析的 AI 服务', env.SERVICE_TYPE || 'deepseek')
   .option('--stats-only', '只输出统计，不调用 AI 服务')
   .action(async (options) => {
     const config = getWechatRuntimeConfig()
@@ -164,6 +195,35 @@ program
       limit: Number(options.limit),
     })
     printAnalysisResult(result)
+  })
+
+program
+  .command('wechat:reindex')
+  .description('一键把历史微信消息重新灌入本地 Qdrant')
+  .option('--room <name>', '只重建某个群聊')
+  .option('--friend <name>', '只重建某个好友')
+  .option('--query <keyword>', '只重建包含关键词的消息')
+  .option('--start <iso>', '开始时间 ISO 8601')
+  .option('--end <iso>', '结束时间 ISO 8601')
+  .option('--limit <number>', '最多读取最近 N 条本地消息，0 表示全部', '0')
+  .option('--batch-size <number>', '每批并发向量化条数', env.WECHAT_REINDEX_BATCH_SIZE || '8')
+  .option('--embed-model <name>', '覆盖本地 embedding 模型，默认使用 OLLAMA_EMBED_MODEL')
+  .option('--reset', '重建前先清空当前 Qdrant collection')
+  .option('--resume', '跳过已存在于 Qdrant 的消息，只补未完成部分')
+  .action(async (options) => {
+    const config = getWechatRuntimeConfig()
+    const result = await reindexWechatMessagesToQdrant({
+      ...options,
+      dataDir: config.dataDir,
+      limit: Number(options.limit),
+      batchSize: Number(options.batchSize),
+      onProgress(progress) {
+        console.log(
+          `[reindex] ${progress.processed}/${progress.total} indexed=${progress.indexed} skipped=${progress.skipped} resumeSkipped=${progress.resumedSkipped} failed=${progress.failed}`,
+        )
+      },
+    })
+    printReindexResult(result)
   })
 
 const lark = program.command('lark').description('飞书 IM 登录、发消息和读取消息')
